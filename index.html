@@ -3,6 +3,7 @@
   AI 判讀回饋 — 轉送頁（GitHub Pages）
   告警卡片的按鈕開這頁，頁面在背景以「不帶登入身分」呼叫 Google Apps Script 寫入回饋，再自己顯示結果。
   為什麼需要：手機瀏覽器登入 Google 帳號時，直接開 Apps Script 會顯示「雲端硬碟：目前無法開啟這個檔案」（資料其實有寫入）。
+  同一告警「先按先贏」：已有回饋時顯示既有判讀，要按「改為…」才會改判（Apps Script force=1）。
   本頁不含任何金鑰；簽章由 n8n 產生、Apps Script 驗證。原始檔：IT-Monitoring-Agent/github-pages/index.html
 -->
 <html lang="zh-Hant">
@@ -16,7 +17,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
   :root{
-    --brand:#E1002B; --bg:#2B2320; --surface:#352B27; --text:#F5F2F1; --muted:#9a9a9a;
+    --brand:#E1002B; --brand-dark:#B3001F; --bg:#2B2320; --surface:#352B27; --text:#F5F2F1; --muted:#9a9a9a;
     --border:rgba(255,255,255,.09); --ok:#3ecf8e; --warn:#f5a623;
   }
   *{box-sizing:border-box;margin:0;padding:0}
@@ -28,9 +29,12 @@
   h1{font-size:22px;font-weight:700;margin-bottom:14px;line-height:1.4}
   h1.ok{color:var(--ok)} h1.bad{color:#ff5c7a} h1.warn{color:var(--warn)} h1.wait{color:var(--text)}
   p{font-size:15px;line-height:1.7;color:#e8dfda;word-break:break-word}
-  p.k{color:var(--muted);font-size:14px}
   .msg{margin-top:14px;padding-top:12px;border-top:1px solid var(--border);color:var(--muted);font-size:14px}
   a{color:#ff5c7a}
+  .btn{display:block;width:100%;margin-top:16px;border:none;border-radius:6px;padding:12px 16px;font-family:inherit;
+       font-size:15px;font-weight:500;cursor:pointer;background:var(--brand);color:#fff}
+  .btn:hover{background:var(--brand-dark)}
+  .btn:disabled{opacity:.5;cursor:default}
   .spin{display:inline-block;width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--brand);border-radius:50%;
         animation:s 1s linear infinite;vertical-align:-3px;margin-right:8px}
   @keyframes s{to{transform:rotate(360deg)}}
@@ -45,32 +49,54 @@
 <script>
   // Apps Script 網頁應用程式網址（換部署網址時改這裡）
   var EXEC = 'https://script.google.com/macros/s/AKfycbzYvsqi3VzaHpIZKD-dGxB8P8MQzBn2lARZw1flGVfGG22KqTf-sTdHK-bssAxoN96Nqg/exec';
+  var VL = { ok: '判讀正確', bad: '判讀不正確' };
 
   var t = document.getElementById('t'), d = document.getElementById('d');
+  var q = location.search, params = new URLSearchParams(q);
+
   function line(text, cls) { var p = document.createElement('p'); if (cls) p.className = cls; p.textContent = text; d.appendChild(p); return p; }
   function show(title, cls, lines, msg) {
     t.className = cls; t.textContent = title; d.innerHTML = '';
-    (lines || []).forEach(function (l) { line(l); });
-    if (msg) { var m = line(msg); m.className = 'msg'; }
+    (lines || []).forEach(function (l) { if (l) line(l); });
+    if (msg) line(msg, 'msg');
+  }
+  function short(at) { var m = String(at || '').match(/\d{4}-(\d{2})-(\d{2}) (\d{2}:\d{2})/); return m ? m[1] + '/' + m[2] + ' ' + m[3] : String(at || ''); }
+  function info(o) { return [o.host ? '主機：' + o.host : '', o.trg ? '觸發器：' + o.trg : '', o.eid ? '事件 ID：' + o.eid : '']; }
+  function icon(v) { return v === 'ok' ? '✅ ' : '❌ '; }
+
+  function render(o) {
+    var L = VL[o.v] || '';
+    if (o.status === 'recorded') show(icon(o.v) + '已記錄：' + L, o.v, info(o), '可以關閉這個頁面了。');
+    else if (o.status === 'updated') show(icon(o.v) + '已改為：' + L, o.v, info(o), '原本為「' + VL[o.prev.v] + '」（' + short(o.prev.at) + '）。');
+    else if (o.status === 'same') show(icon(o.v) + '已回饋過：' + L, o.v, info(o), '此告警已於 ' + short(o.at) + ' 回饋為「' + L + '」，不需要再按。');
+    else if (o.status === 'exists') {
+      show('⚠️ 此告警已有回饋：' + VL[o.prev.v], 'warn', info(o).concat(['回饋時間：' + short(o.prev.at)]),
+           '這次沒有變更。若確定要改判，請按下方按鈕；不需要的話直接關閉即可。');
+      var b = document.createElement('button');
+      b.className = 'btn'; b.textContent = '改為「' + L + '」';
+      b.onclick = function () { b.disabled = true; b.textContent = '更新中…'; send('&force=1'); };
+      d.appendChild(b);
+    }
+    else if (o.status === 'badsig') show('⚠️ 連結驗證失敗，沒有記錄', 'warn', info(o), '請從 Teams 告警卡片上的按鈕點選。');
+    else if (o.status === 'invalid') show('⚠️ 參數不完整，沒有記錄', 'warn', [], '');
+    else show('⚠️ 發生錯誤，沒有記錄', 'warn', info(o), o.msg || '');
   }
 
-  var q = location.search;
-  var params = new URLSearchParams(q);
-  if (!params.get('eid') || !params.get('sig')) {
-    show('這個頁面要從 Teams 告警卡片的按鈕開啟', 'warn', [], '直接開啟本頁不會記錄任何資料。');
-  } else {
+  // 舊版 Apps Script（只回純文字）相容：解析狀態列
+  function renderText(txt) {
+    var ls = txt.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+    var st = ls.find(function (l) { return /^(✅|❌|⚠️)/.test(l); }) || '回應格式不正確';
+    var cls = st.indexOf('✅') === 0 ? 'ok' : st.indexOf('❌') === 0 ? 'bad' : 'warn';
+    var rest = ls.filter(function (l) { return l !== st && l !== 'AI 判讀回饋'; });
+    show(st, cls, rest.filter(function (l) { return /：/.test(l) && l.length < 200; }),
+         rest.filter(function (l) { return !(/：/.test(l) && l.length < 200); }).join(' '));
+  }
+
+  function send(extra) {
     // credentials:'omit'：不帶 Google 登入 Cookie，避開「目前無法開啟這個檔案」
-    fetch(EXEC + q, { credentials: 'omit', cache: 'no-store', redirect: 'follow' })
+    fetch(EXEC + q + '&fmt=json' + (extra || ''), { credentials: 'omit', cache: 'no-store', redirect: 'follow' })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
-      .then(function (txt) {
-        var ls = txt.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
-        var st = ls.find(function (l) { return /^(✅|❌|⚠️)/.test(l); }) || '';
-        var cls = st.indexOf('✅') === 0 ? 'ok' : st.indexOf('❌') === 0 ? 'bad' : 'warn';
-        var title = st.replace(/^(✅|❌|⚠️)\s*/, '') || '回應格式不正確';
-        var info = ls.filter(function (l) { return l !== st && l !== 'AI 判讀回饋' && /：/.test(l) && l.length < 200; });
-        var msg = ls.filter(function (l) { return l !== st && l !== 'AI 判讀回饋' && info.indexOf(l) < 0; }).join(' ');
-        show((cls === 'ok' ? '✅ ' : cls === 'bad' ? '❌ ' : '⚠️ ') + title, cls, info, msg);
-      })
+      .then(function (txt) { var o; try { o = JSON.parse(txt); } catch (e) { return renderText(txt); } render(o); })
       .catch(function (e) {
         show('⚠️ 無法連線到記錄服務', 'warn', ['（' + e.message + '）'], '');
         var p = line('', 'msg');
@@ -80,6 +106,9 @@
         p.appendChild(document.createTextNode('（若出現「無法開啟檔案」，回饋通常仍已記錄）。'));
       });
   }
+
+  if (!params.get('eid') || !params.get('sig')) show('這個頁面要從 Teams 告警卡片的按鈕開啟', 'warn', [], '直接開啟本頁不會記錄任何資料。');
+  else send('');
 </script>
 </body>
 </html>
